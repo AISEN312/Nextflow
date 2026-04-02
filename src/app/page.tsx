@@ -1,12 +1,8 @@
-"use client";
-
 import Link from "next/link";
-import { useAuth, SignInButton, UserButton } from "@clerk/nextjs";
+import { Show, SignInButton, UserButton } from "@clerk/nextjs";
 import { Zap, ArrowRight, Brain, ImageIcon, Video, Crop, Film, Type } from "lucide-react";
 
 export default function Home() {
-  const { isSignedIn } = useAuth();
-
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950">
       {/* Header */}
@@ -17,23 +13,22 @@ export default function Home() {
             <span className="text-lg font-bold text-zinc-100">NextFlow</span>
           </div>
           <div className="flex items-center gap-4">
-            {!isSignedIn ? (
+            <Show when="signed-out">
               <SignInButton mode="modal">
                 <button className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors">
                   Sign In
                 </button>
               </SignInButton>
-            ) : (
-              <>
-                <Link
-                  href="/workflow"
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
-                >
-                  Open Editor <ArrowRight className="w-4 h-4" />
-                </Link>
-                <UserButton />
-              </>
-            )}
+            </Show>
+            <Show when="signed-in">
+              <Link
+                href="/workflow"
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                Open Editor <ArrowRight className="w-4 h-4" />
+              </Link>
+              <UserButton />
+            </Show>
           </div>
         </div>
       </header>
@@ -61,20 +56,21 @@ export default function Home() {
           </p>
 
           <div className="flex items-center justify-center gap-4 mb-16">
-            {!isSignedIn ? (
+            <Show when="signed-out">
               <SignInButton mode="modal">
                 <button className="px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-medium transition-colors flex items-center gap-2">
                   Get Started <ArrowRight className="w-4 h-4" />
                 </button>
               </SignInButton>
-            ) : (
+            </Show>
+            <Show when="signed-in">
               <Link
                 href="/workflow"
                 className="px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
               >
                 Open Workflow Editor <ArrowRight className="w-4 h-4" />
               </Link>
-            )}
+            </Show>
           </div>
 
           {/* Node types showcase */}
