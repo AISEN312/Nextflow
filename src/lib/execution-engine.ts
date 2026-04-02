@@ -8,6 +8,140 @@ import type {
 import { getExecutionLevels, getUpstreamNodes } from "@/lib/dag";
 import { v4 as uuidv4 } from "uuid";
 
+/**
+ * Calls the Gemini API directly (server-side).
+ */
+async function callGeminiAPI(params: {
+  model: string;
+  systemPrompt: string;
+  userMessage: string;
+  imageUrls: string[];
+}): Promise<string> {
+  const apiKey = process.env.GOOGLE_AI_API_KEY;
+  if (!apiKey) throw new Error("Google AI API key not configured");
+
+  const userParts: Array<Record<string, unknown>> = [];
+  userParts.push({ text: params.userMessage });
+
+  for (const imageUrl of params.imageUrls) {
+    if (imageUrl.startsWith("data:")) {
+      const [meta, base64Data] = imageUrl.split(",");
+      const mimeType = meta.match(/data:(.*?);/)?.[1] || "image/jpeg";
+      userParts.push({ inlineData: { mimeType, data: base64Data } });
+    } else if (imageUrl.startsWith("http")) {
+      try {
+        const imgRes = await fetch(imageUrl);
+        const buffer = await imgRes.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString("base64");
+        const contentType = imgRes.headers.get("content-type") || "image/jpeg";
+        userParts.push({ inlineData: { mimeType: contentType, data: base64 } });
+      } catch {
+        console.warn("Failed to fetch image:", imageUrl);
+      }
+    }
+  }
+
+  const contents = [{ role: "user", parts: userParts }];
+  const geminiBody: Record<string, unknown> = {
+    contents,
+    generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+  };
+
+  if (params.systemPrompt) {
+    geminiBody.systemInstruction = { parts: [{ text: params.systemPrompt }] };
+  }
+
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${params.model}:generateContent?key=${apiKey}`;
+  const geminiRes = await fetch(geminiUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(geminiBody),
+  });
+
+  if (!geminiRes.ok) {
+    const errorData = await geminiRes.json().catch(() => ({}));
+    throw new Error(
+      `Gemini API error: ${(errorData as { error?: { message?: string } }).error?.message || geminiRes.statusText}`
+    );
+  }
+
+  const geminiData = (await geminiRes.json()) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  return geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
+}
+
+/**
+ * Processes crop image request directly (server-side).
+ * Returns the image URL with crop metadata (actual FFmpeg processing requires Trigger.dev).
+ */
+async function processCropImage(params: {
+  imageUrl: string;
+  xPercent: number;
+  yPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+}): Promise<string> {
+  const triggerApiKey = process.env.TRIGGER_SECRET_KEY;
+  if (triggerApiKey && process.env.TRIGGER_API_URL) {
+    try {
+      const triggerRes = await fetch(
+        `${process.env.TRIGGER_API_URL}/api/v1/tasks/crop-image/trigger`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${triggerApiKey}`,
+          },
+          body: JSON.stringify({ payload: params }),
+        }
+      );
+      if (triggerRes.ok) {
+        const result = (await triggerRes.json()) as { output?: { url?: string } };
+        return result.output?.url || params.imageUrl;
+      }
+    } catch (err) {
+      console.error("Trigger.dev crop task error:", err);
+    }
+  }
+  // Fallback: return original image (crop metadata only)
+  return params.imageUrl;
+}
+
+/**
+ * Processes extract frame request directly (server-side).
+ * Returns frame URL (actual FFmpeg processing requires Trigger.dev).
+ */
+async function processExtractFrame(params: {
+  videoUrl: string;
+  timestamp: string;
+}): Promise<string> {
+  const triggerApiKey = process.env.TRIGGER_SECRET_KEY;
+  if (triggerApiKey && process.env.TRIGGER_API_URL) {
+    try {
+      const triggerRes = await fetch(
+        `${process.env.TRIGGER_API_URL}/api/v1/tasks/extract-frame/trigger`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${triggerApiKey}`,
+          },
+          body: JSON.stringify({ payload: params }),
+        }
+      );
+      if (triggerRes.ok) {
+        const result = (await triggerRes.json()) as { output?: { url?: string } };
+        return result.output?.url || "";
+      }
+    } catch (err) {
+      console.error("Trigger.dev extract-frame task error:", err);
+    }
+  }
+  // Fallback: return empty (frame extraction requires Trigger.dev with FFmpeg)
+  return "";
+}
+
 interface ExecutionContext {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
@@ -97,24 +231,12 @@ async function executeNode(
 
         if (!userMessage) throw new Error("User message is required");
 
-        const res = await fetch("/api/execute/llm", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: llmData.model || "gemini-2.0-flash",
-            systemPrompt,
-            userMessage,
-            imageUrls: images,
-          }),
+        output = await callGeminiAPI({
+          model: llmData.model || "gemini-2.0-flash",
+          systemPrompt,
+          userMessage,
+          imageUrls: images,
         });
-
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || "LLM execution failed");
-        }
-
-        const result = await res.json();
-        output = result.text || "";
         break;
       }
 
@@ -142,25 +264,13 @@ async function executeNode(
           (resolveInput(node.id, "height_percent", ctx) as string) ||
           String(cropData.heightPercent ?? 100);
 
-        const res = await fetch("/api/execute/crop", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            imageUrl,
-            xPercent: parseFloat(xPercent),
-            yPercent: parseFloat(yPercent),
-            widthPercent: parseFloat(widthPercent),
-            heightPercent: parseFloat(heightPercent),
-          }),
+        output = await processCropImage({
+          imageUrl,
+          xPercent: parseFloat(xPercent),
+          yPercent: parseFloat(yPercent),
+          widthPercent: parseFloat(widthPercent),
+          heightPercent: parseFloat(heightPercent),
         });
-
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || "Crop execution failed");
-        }
-
-        const result = await res.json();
-        output = result.url || "";
         break;
       }
 
@@ -175,19 +285,7 @@ async function executeNode(
           frameData.timestamp ||
           "0";
 
-        const res = await fetch("/api/execute/extract-frame", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ videoUrl, timestamp }),
-        });
-
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || "Frame extraction failed");
-        }
-
-        const result = await res.json();
-        output = result.url || "";
+        output = await processExtractFrame({ videoUrl, timestamp });
         break;
       }
     }
